@@ -55,13 +55,28 @@ def run(request: dict[str, Any], timeout: float = 3.0) -> dict[str, Any]:
             response = read_message(response_path)
         except (OSError, json.JSONDecodeError, ValueError) as error:
             raise IntegrationError(f"Ответ worker повреждён: {error}") from error
-        if response.get("protocol_version") != PROTOCOL_VERSION:
+        version = response.get("protocol_version")
+        if type(version) is not int or version != PROTOCOL_VERSION:
             raise IntegrationError(
                 "Версия протокола ответа не совпадает с версией клиента"
             )
         if response.get("status") != "ok":
             raise IntegrationError(response.get("error", "Worker вернул неизвестную ошибку"))
+        _validate_result(response.get("data"), normalized["payload"])
         return response
+
+
+def _validate_result(data: Any, dimensions: dict[str, int]) -> None:
+    """Check that a successful reply matches the requested matrix."""
+    if not isinstance(data, dict):
+        raise IntegrationError("Неверный формат данных ответа")
+    for field, expected in dimensions.items():
+        value = data.get(field)
+        if type(value) is not int or value != expected:
+            raise IntegrationError(f"Несоответствие данных ответа: {field}")
+    count = data.get("positive_count")
+    if type(count) is not int or not 0 <= count <= dimensions["rows"] * dimensions["columns"]:
+        raise IntegrationError("Некорректный счётчик в составе данных ответа")
 
 
 def run_file(input_path: str | Path, output_path: str | Path, timeout: float = 3.0) -> dict[str, Any]:

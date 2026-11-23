@@ -4,10 +4,12 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.input_module import InputDataError, validate_request
-from src.integration import IntegrationError, run, run_file
+from src.integration import IntegrationError, main, run, run_file
+from src.output_module import read_message
 from src.processing_module import count_positive_elements
 from src.worker import handle
 
@@ -64,7 +66,7 @@ class IntegrationTests(unittest.TestCase):
             input_path.write_text('{"protocol_version":1,"payload":{"rows":2,"columns":3}}', encoding="utf-8")
             response = run_file(input_path, output_path)
             self.assertEqual(response["data"]["positive_count"], 5)
-            self.assertEqual(output_path.exists(), True)
+            self.assertEqual(read_message(output_path), response)
 
     def test_timeout_is_reported(self):
         with patch("src.integration.subprocess.run", side_effect=subprocess.TimeoutExpired("worker", 0.01)):
@@ -89,6 +91,39 @@ class IntegrationTests(unittest.TestCase):
     def test_worker_rejects_bad_request(self):
         with self.assertRaisesRegex(InputDataError, "положительным"):
             handle({"protocol_version": 1, "payload": {"rows": 0, "columns": 3}})
+
+    def test_corrupted_worker_response_is_reported(self):
+        def write_broken_response(command, **kwargs):
+            Path(command[-1]).write_text("{", encoding="utf-8")
+            return SimpleNamespace(returncode=0)
+
+        with patch("src.integration.subprocess.run", side_effect=write_broken_response):
+            with self.assertRaisesRegex(IntegrationError, "повреждён"):
+                run(REQUEST)
+
+    def test_worker_error_status_is_reported(self):
+        def write_error_response(command, **kwargs):
+            Path(command[-1]).write_text(
+                '{"protocol_version":1,"status":"error","error":"TEST"}', encoding="utf-8"
+            )
+            return SimpleNamespace(returncode=1)
+
+        with patch("src.integration.subprocess.run", side_effect=write_error_response):
+            with self.assertRaisesRegex(IntegrationError, "TEST"):
+                run(REQUEST)
+
+    def test_cli_prints_result_and_saves_response(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / "request.json"
+            response = Path(directory) / "response.json"
+            request.write_text(
+                '{"protocol_version":1,"payload":{"rows":1,"columns":1}}', encoding="utf-8"
+            )
+            args = ["integration.py", str(request), "--output", str(response)]
+            with patch("sys.argv", args), patch("builtins.print") as output:
+                self.assertEqual(main(), 0)
+            output.assert_any_call("Размер матрицы: 1 x 1\nПоложительных элементов: 0")
+            self.assertEqual(read_message(response)["data"]["positive_count"], 0)
 
 
 if __name__ == "__main__":
